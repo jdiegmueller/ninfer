@@ -5,6 +5,7 @@
 #include "serve/openai_schema.h"
 #include "serve/request_log.h"
 #include "serve/translate.h"
+#include "serve/wire_stats.h"
 
 #include <nlohmann/json.hpp>
 
@@ -398,15 +399,18 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 return req.is_connection_alive && !req.is_connection_alive();
             });
             log_request_done(log_context, outcome);
-            const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens};
+            const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens,
+                                        static_cast<int>(outcome.metrics.prefix_cache_hit_tokens)};
+            const nlohmann::json timings = make_wire_timings(outcome);
             std::string response_body;
             if (!outcome.tool_calls.empty()) {
                 response_body = make_chat_completion_tool_response(
-                    id, model, created, outcome.text, outcome.reasoning, outcome.tool_calls, usage);
+                    id, model, created, outcome.text, outcome.reasoning, outcome.tool_calls, usage,
+                    &timings);
             } else {
                 response_body = make_chat_completion_response(
                     id, model, created, outcome.text, outcome.reasoning,
-                    finish_reason_wire(outcome.finish_reason), usage);
+                    finish_reason_wire(outcome.finish_reason), usage, &timings);
             }
             set_owned_content(res, std::move(response_body), prepared.lifetime);
         } catch (const std::exception& e) {
@@ -455,6 +459,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
 
                 const GenerationOutcome outcome = service_->run(stream->prepared, &output);
                 log_request_done(log_context, outcome);
+                const nlohmann::json timings = make_wire_timings(outcome);
                 const std::string_view remaining = unstreamed_content(outcome);
                 if (!outcome.tool_calls.empty()) {
                     if (!remaining.empty()) {
@@ -468,7 +473,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                           id, model, created, outcome.tool_calls, include_usage));
                     write_stream_item(
                         sink, *stream,
-                        make_chat_chunk_final(id, model, created, "tool_calls", include_usage));
+                        make_chat_chunk_final(id, model, created, "tool_calls", include_usage,
+                                              &timings));
                 } else {
                     if (tool_capable && !remaining.empty()) {
                         write_stream_item(sink, *stream,
@@ -480,10 +486,12 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                         sink, *stream,
                         make_chat_chunk_final(id, model, created,
                                               finish_reason_wire(outcome.finish_reason),
-                                              include_usage));
+                                              include_usage, &timings));
                 }
                 if (include_usage) {
-                    const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens};
+                    const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens,
+                                                static_cast<int>(
+                                                    outcome.metrics.prefix_cache_hit_tokens)};
                     write_stream_item(sink, *stream,
                                       make_chat_chunk_usage(id, model, created, usage));
                 }
@@ -611,12 +619,15 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
                 return req.is_connection_alive && !req.is_connection_alive();
             });
             log_request_done(log_context, outcome);
-            const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens};
+            const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens,
+                                        static_cast<int>(outcome.metrics.prefix_cache_hit_tokens)};
+            const nlohmann::json timings = make_wire_timings(outcome);
             const char* stop_reason =
                 messages_stop_reason(outcome.finish_reason, !outcome.tool_calls.empty());
             set_owned_content(res,
                               make_messages_response(id, model, outcome.text, outcome.reasoning,
-                                                     outcome.tool_calls, stop_reason, usage),
+                                                     outcome.tool_calls, stop_reason, usage,
+                                                     &timings),
                               prepared.lifetime);
         } catch (const ApiException& e) {
             log_request_error(log_context, e.error().message);
@@ -726,8 +737,12 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
 
                 const char* stop_reason =
                     messages_stop_reason(outcome.finish_reason, !outcome.tool_calls.empty());
-                write_stream_item(sink, *stream,
-                                  make_message_delta(stop_reason, outcome.completion_tokens));
+                const nlohmann::json timings = make_wire_timings(outcome);
+                write_stream_item(
+                    sink, *stream,
+                    make_message_delta(stop_reason, outcome.completion_tokens,
+                                       static_cast<int>(outcome.metrics.prefix_cache_hit_tokens),
+                                       &timings));
                 write_stream_item(sink, *stream, make_message_stop());
                 sink.done();
                 return true;

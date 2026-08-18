@@ -328,6 +328,7 @@ if(NINFER_BUILD_SERVE)
     serve/response_store.cpp
     serve/tool_call_parser.cpp
     serve/translate.cpp
+    serve/wire_stats.cpp
     serve/console_log.cpp
     serve/generation_service.cpp
     serve/request_log.cpp

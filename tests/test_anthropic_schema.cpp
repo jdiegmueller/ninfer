@@ -108,6 +108,18 @@ Json parse_sse(const std::string& event, std::string* out_type = nullptr) {
     return Json::parse(event.substr(json_begin, event.size() - json_begin - suffix.size()));
 }
 
+// Stand-in for the per-request wire statistics block produced by
+// make_wire_timings (arithmetic is covered by the wire_stats test).
+Json test_timings_json() {
+    return Json{{"prompt_ms", 12.5},
+                {"prompt_n", 7},
+                {"prompt_per_second", 560.0},
+                {"predicted_ms", 30.0},
+                {"predicted_n", 3},
+                {"predicted_per_second", 100.0},
+                {"cache_n", 2}};
+}
+
 int test_parse_basic_and_system() {
     int failures                = 0;
     const Json body             = {{"model", "claude-sonnet-4-5"},
@@ -609,11 +621,12 @@ int test_stop_reason_mapping() {
 
 int test_response_serialization() {
     int failures = 0;
-    const CompletionUsage usage{7, 3};
+    const CompletionUsage usage{7, 3, 2};
+    const Json timings = test_timings_json();
     const std::vector<ToolCall> tools = {ToolCall{"toolu_9", "get_weather", R"({"city":"Paris"})"}};
 
     const Json resp = Json::parse(make_messages_response(
-        "msg_1", "claude-x", "the answer", "the reasoning", tools, "tool_use", usage));
+        "msg_1", "claude-x", "the answer", "the reasoning", tools, "tool_use", usage, &timings));
     failures += check(resp.at("id") == "msg_1", "id echoed");
     failures += check(resp.at("type") == "message", "type message");
     failures += check(resp.at("role") == "assistant", "role assistant");
@@ -622,6 +635,10 @@ int test_response_serialization() {
     failures += check(resp.at("stop_sequence").is_null(), "stop_sequence null");
     failures += check(resp.at("usage").at("input_tokens") == 7, "input_tokens");
     failures += check(resp.at("usage").at("output_tokens") == 3, "output_tokens");
+    failures += check(resp.at("usage").at("cache_read_input_tokens") == 2,
+                      "usage cache_read_input_tokens");
+    failures += check(resp.at("timings").at("cache_n") == 2 && resp.at("timings").at("prompt_n") == 7,
+                      "timings attached to message body");
     const Json& content = resp.at("content");
     failures += check(content.size() == 3, "thinking + text + tool_use blocks");
     failures += check(content.at(0).at("type") == "thinking" &&
@@ -634,13 +651,17 @@ int test_response_serialization() {
                       "tool_use block");
     failures += check(content.at(2).at("input").at("city") == "Paris", "tool_use input is object");
 
-    // Empty output falls back to a single empty text block.
-    const Json empty = Json::parse(
-        make_messages_response("msg_2", "m", "", "", {}, "end_turn", CompletionUsage{1, 0}));
+    // Empty output falls back to a single empty text block; usage still carries
+    // cache_read_input_tokens (zero when nothing was reused).
+    const Json empty = Json::parse(make_messages_response("msg_2", "m", "", "", {}, "end_turn",
+                                                          CompletionUsage{1, 0, 0}, nullptr));
     failures +=
         check(empty.at("content").size() == 1 && empty.at("content").at(0).at("type") == "text" &&
                   empty.at("content").at(0).at("text") == "",
               "empty output -> empty text block");
+    failures += check(empty.at("usage").at("cache_read_input_tokens") == 0,
+                      "cache_read_input_tokens present at zero");
+    failures += check(!empty.contains("timings"), "no timings when not provided");
     return failures;
 }
 
@@ -697,12 +718,23 @@ int test_streaming_events() {
     const Json stop = parse_sse(make_content_block_stop(2), &type);
     failures += check(type == "content_block_stop" && stop.at("index") == 2, "content_block_stop");
 
-    const Json mdelta = parse_sse(make_message_delta("tool_use", 5), &type);
+    const Json timings = test_timings_json();
+    const Json mdelta = parse_sse(make_message_delta("tool_use", 5, 3, &timings), &type);
     failures +=
         check(type == "message_delta" && mdelta.at("delta").at("stop_reason") == "tool_use" &&
                   mdelta.at("delta").at("stop_sequence").is_null() &&
                   mdelta.at("usage").at("output_tokens") == 5,
               "message_delta stop_reason + usage");
+    failures +=
+        check(mdelta.at("usage").at("cache_read_input_tokens") == 3,
+              "message_delta cache_read_input_tokens");
+    failures += check(mdelta.at("timings").at("predicted_n") == 3,
+                      "message_delta carries timings");
+
+    const Json mdelta_plain = parse_sse(make_message_delta("end_turn", 2, 0, nullptr), &type);
+    failures += check(mdelta_plain.at("usage").at("cache_read_input_tokens") == 0 &&
+                          !mdelta_plain.contains("timings"),
+                      "message_delta without timings omits the key");
 
     const Json mstop = parse_sse(make_message_stop(), &type);
     failures += check(type == "message_stop" && mstop.at("type") == "message_stop", "message_stop");

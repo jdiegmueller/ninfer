@@ -570,7 +570,7 @@ const char* messages_stop_reason(ninfer::FinishReason reason, bool has_tool_call
 std::string make_messages_response(const std::string& id, const std::string& model,
                                    const std::string& content, const std::string& reasoning,
                                    const std::vector<ToolCall>& tool_calls, const char* stop_reason,
-                                   const CompletionUsage& usage) {
+                                   const CompletionUsage& usage, const nlohmann::json* timings) {
     Json blocks = Json::array();
     if (!reasoning.empty()) {
         blocks.push_back(Json{{"type", "thinking"}, {"thinking", reasoning}, {"signature", ""}});
@@ -585,15 +585,17 @@ std::string make_messages_response(const std::string& id, const std::string& mod
                               {"input", std::move(input)}});
     }
     if (blocks.empty()) { blocks.push_back(Json{{"type", "text"}, {"text", ""}}); }
-    const Json payload = {{"id", id},
-                          {"type", "message"},
-                          {"role", "assistant"},
-                          {"model", model},
-                          {"content", std::move(blocks)},
-                          {"stop_reason", stop_reason},
-                          {"stop_sequence", nullptr},
-                          {"usage", Json{{"input_tokens", usage.prompt_tokens},
-                                         {"output_tokens", usage.completion_tokens}}}};
+    Json payload = {{"id", id},
+                    {"type", "message"},
+                    {"role", "assistant"},
+                    {"model", model},
+                    {"content", std::move(blocks)},
+                    {"stop_reason", stop_reason},
+                    {"stop_sequence", nullptr},
+                    {"usage", Json{{"input_tokens", usage.prompt_tokens},
+                                   {"cache_read_input_tokens", usage.cached_tokens},
+                                   {"output_tokens", usage.completion_tokens}}}};
+    if (timings != nullptr) { payload["timings"] = *timings; }
     return payload.dump();
 }
 
@@ -657,11 +659,14 @@ std::string make_content_block_stop(int index) {
     return sse("content_block_stop", Json{{"type", "content_block_stop"}, {"index", index}});
 }
 
-std::string make_message_delta(const char* stop_reason, int output_tokens) {
-    return sse("message_delta",
-               Json{{"type", "message_delta"},
+std::string make_message_delta(const char* stop_reason, int output_tokens,
+                               int cache_read_input_tokens, const nlohmann::json* timings) {
+    Json payload = {{"type", "message_delta"},
                     {"delta", Json{{"stop_reason", stop_reason}, {"stop_sequence", nullptr}}},
-                    {"usage", Json{{"output_tokens", output_tokens}}}});
+                    {"usage", Json{{"output_tokens", output_tokens},
+                                   {"cache_read_input_tokens", cache_read_input_tokens}}}};
+    if (timings != nullptr) { payload["timings"] = *timings; }
+    return sse("message_delta", payload);
 }
 
 std::string make_message_stop() { return sse("message_stop", Json{{"type", "message_stop"}}); }

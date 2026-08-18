@@ -31,11 +31,13 @@ const char* messages_stop_reason(ninfer::FinishReason reason, bool has_tool_call
 // Non-streaming Messages response body (JSON string). Content blocks are emitted
 // in order: an optional `thinking` block (from reasoning), an optional `text`
 // block (from content), then a `tool_use` block per tool call. When nothing was
-// produced an empty text block is emitted so `content` is never empty.
+// produced an empty text block is emitted so `content` is never empty. `timings`
+// (per-request wire statistics) is attached next to `usage` when provided.
 std::string make_messages_response(const std::string& id, const std::string& model,
                                    const std::string& content, const std::string& reasoning,
                                    const std::vector<ToolCall>& tool_calls, const char* stop_reason,
-                                   const CompletionUsage& usage);
+                                   const CompletionUsage& usage,
+                                   const nlohmann::json* timings);
 
 // Streaming SSE event strings ("event: <type>\ndata: {...}\n\n"). The transport
 // drives the block state machine (open/close, running index) and calls these pure
@@ -48,7 +50,11 @@ std::string make_content_block_delta_text(int index, const std::string& delta_te
 std::string make_content_block_delta_thinking(int index, const std::string& delta_text);
 std::string make_content_block_delta_tool_json(int index, const std::string& partial_json);
 std::string make_content_block_stop(int index);
-std::string make_message_delta(const char* stop_reason, int output_tokens);
+// Terminal `message_delta` event: stop reason plus output usage. Carries
+// `cache_read_input_tokens` (known only after the generation runs) and the
+// per-request `timings` block when provided.
+std::string make_message_delta(const char* stop_reason, int output_tokens,
+                               int cache_read_input_tokens, const nlohmann::json* timings);
 std::string make_message_stop();
 std::string make_messages_ping();
 

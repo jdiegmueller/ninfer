@@ -2,6 +2,7 @@
 
 #include "serve/generation_service.h"
 #include "serve/openai_schema.h"
+#include "serve/wire_stats.h"
 
 #include <algorithm>
 #include <array>
@@ -914,6 +915,7 @@ BuiltResponse build_response(const std::string& id, std::int64_t created_at,
              {"output_tokens", outcome.completion_tokens},
              {"output_tokens_details", Json{{"reasoning_tokens", outcome.reasoning_tokens}}},
              {"total_tokens", outcome.prompt_tokens + outcome.completion_tokens}};
+    response["timings"] = make_wire_timings(outcome);
     built.body = std::move(response);
     return built;
 }
@@ -1261,7 +1263,10 @@ std::string ResponsesEventStream::terminal(const BuiltResponse& response) {
                                : status == "incomplete" ? "response.incomplete"
                                : status == "cancelled"  ? "response.cancelled"
                                                         : "response.failed";
-    return sse(impl_->event(type, Json{{"response", response.body}}));
+    Json payload = Json{{"response", response.body}};
+    // Stream consumers parse the per-request statistics from the event's top level.
+    if (response.body.contains("timings")) { payload["timings"] = response.body.at("timings"); }
+    return sse(impl_->event(type, payload));
 }
 
 std::string ResponsesEventStream::failed(const ApiError& error) {

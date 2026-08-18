@@ -361,6 +361,8 @@ GenerationOutcome sample_outcome() {
     outcome.reasoning_tokens                = 3;
     outcome.finish_reason                   = ninfer::FinishReason::StopToken;
     outcome.metrics.prefix_cache_hit_tokens = 4;
+    outcome.metrics.prefill_seconds         = 0.05;
+    outcome.metrics.decode_seconds          = 0.35;
     return outcome;
 }
 
@@ -393,6 +395,12 @@ int test_response_object() {
                   response.at("usage").at("output_tokens_details").at("reasoning_tokens") == 3 &&
                   response.at("usage").at("total_tokens") == 18,
               "Responses usage details serialized");
+    failures += check(response.at("timings").at("prompt_n") == 11 &&
+                          response.at("timings").at("predicted_n") == 7 &&
+                          response.at("timings").at("cache_n") == 4 &&
+                          response.at("timings").at("prompt_per_second") == 140.0 &&
+                          response.at("timings").at("predicted_per_second") == 20.0,
+                      "wire timings block on terminal body (7 computed / 0.05s, 7 / 0.35s)");
     failures += check(built.output_history.size() == 1 &&
                           built.output_history[0].reasoning_content == "thought" &&
                           built.output_history[0].content[0].text == "answer",
@@ -453,6 +461,10 @@ int test_sse_sequence() {
                       "stream starts with response.created");
     failures += check(parse_event(wire.back()).at("type") == "response.completed",
                       "stream ends with response.completed");
+    const Json terminal = parse_event(wire.back());
+    failures += check(terminal.contains("timings") &&
+                          terminal.at("timings") == terminal.at("response").at("timings"),
+                      "terminal event repeats timings at top level for stream parsers");
     failures += check(text_deltas == "answer", "text deltas reconstruct terminal output");
     failures += check(saw_reasoning_delta, "raw reasoning delta emitted");
     return failures;

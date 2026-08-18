@@ -100,6 +100,18 @@ Json parse_sse(const std::string& event) {
     return Json::parse(json);
 }
 
+// Stand-in for the per-request wire statistics block produced by
+// make_wire_timings (arithmetic is covered by the wire_stats test).
+Json test_timings_json() {
+    return Json{{"prompt_ms", 12.5},
+                {"prompt_n", 10},
+                {"prompt_per_second", 640.0},
+                {"predicted_ms", 30.0},
+                {"predicted_n", 3},
+                {"predicted_per_second", 100.0},
+                {"cache_n", 4}};
+}
+
 int test_parse_string_content() {
     int failures                = 0;
     const Json body             = {{"model", "qwen3.6-27b"},
@@ -533,9 +545,10 @@ int test_parse_sampling_carried() {
 
 int test_response_serialization() {
     int failures = 0;
-    const CompletionUsage usage{10, 3};
-    const Json j = Json::parse(
-        make_chat_completion_response("id-1", "m", 111, "hello world", "", "stop", usage));
+    const CompletionUsage usage{10, 3, 4};
+    const Json timings = test_timings_json();
+    const Json j = Json::parse(make_chat_completion_response("id-1", "m", 111, "hello world", "",
+                                                             "stop", usage, &timings));
     failures += check(j.at("object") == "chat.completion", "response object");
     failures += check(j.at("id") == "id-1", "response id");
     failures +=
@@ -550,10 +563,24 @@ int test_response_serialization() {
     failures += check(j.at("usage").at("prompt_tokens") == 10, "usage prompt_tokens");
     failures += check(j.at("usage").at("completion_tokens") == 3, "usage completion_tokens");
     failures += check(j.at("usage").at("total_tokens") == 13, "usage total_tokens");
+    failures += check(j.at("usage").at("prompt_tokens_details").at("cached_tokens") == 4,
+                      "usage prompt_tokens_details.cached_tokens");
+    failures += check(j.at("timings").at("cache_n") == 4 && j.at("timings").at("prompt_n") == 10,
+                      "timings attached to response body");
+
+    // A request without prefix reuse carries no prompt_tokens_details.
+    const CompletionUsage fresh_usage{10, 3, 0};
+    const Json j_fresh = Json::parse(make_chat_completion_response("id-1b", "m", 111, "hello",
+                                                                   "", "stop", fresh_usage,
+                                                                   nullptr));
+    failures += check(!j_fresh.at("usage").contains("prompt_tokens_details"),
+                      "no prompt_tokens_details without cache reuse");
+    failures += check(!j_fresh.contains("timings"), "no timings when not provided");
 
     // Non-empty reasoning is attached as message.reasoning_content, content stays answer-only.
     const Json jr = Json::parse(make_chat_completion_response("id-2", "m", 111, "the answer",
-                                                              "let me think", "stop", usage));
+                                                              "let me think", "stop", usage,
+                                                              &timings));
     failures += check(jr.at("choices").at(0).at("message").at("content") == "the answer",
                       "reasoning response content is answer only");
     failures +=
@@ -564,11 +591,13 @@ int test_response_serialization() {
 
 int test_tool_response_serialization() {
     int failures = 0;
-    const CompletionUsage usage{12, 6};
+    const CompletionUsage usage{12, 6, 2};
+    const Json timings = test_timings_json();
     const std::vector<ToolCall> calls = {
         ToolCall{"call_abc", "get_weather", R"({"city":"Paris"})"}};
-    const Json j = Json::parse(
-        make_chat_completion_tool_response("id-tool", "m", 222, "", "need weather", calls, usage));
+    const Json j = Json::parse(make_chat_completion_tool_response("id-tool", "m", 222, "",
+                                                                  "need weather", calls, usage,
+                                                                  &timings));
 
     failures += check(j.at("object") == "chat.completion", "tool response object");
     const Json& choice = j.at("choices").at(0);
@@ -584,9 +613,12 @@ int test_tool_response_serialization() {
     failures += check(call.at("function").at("arguments") == R"({"city":"Paris"})",
                       "tool function arguments");
     failures += check(j.at("usage").at("total_tokens") == 18, "tool usage total");
+    failures += check(j.at("usage").at("prompt_tokens_details").at("cached_tokens") == 2,
+                      "tool usage cached_tokens");
+    failures += check(j.at("timings").at("cache_n") == 4, "tool timings attached");
 
     const Json with_content = Json::parse(make_chat_completion_tool_response(
-        "id-tool-2", "m", 223, "Calling weather.", "", calls, usage));
+        "id-tool-2", "m", 223, "Calling weather.", "", calls, usage, &timings));
     failures +=
         check(with_content.at("choices").at(0).at("message").at("content") == "Calling weather.",
               "tool content prefix carried");
@@ -620,25 +652,35 @@ int test_chunk_serialization() {
     failures += check(content_usage.contains("usage") && content_usage.at("usage").is_null(),
                       "content usage null when include_usage=true");
 
-    // Final chunk carries finish_reason with an empty delta and no usage stats.
-    const Json final_chunk = parse_sse(make_chat_chunk_final("id", "m", 1, "length", true));
+    // Final chunk carries finish_reason with an empty delta, no usage stats, and
+    // the per-request timings block when provided.
+    const Json timings = test_timings_json();
+    const Json final_chunk = parse_sse(
+        make_chat_chunk_final("id", "m", 1, "length", true, &timings));
     failures += check(final_chunk.at("choices").at(0).at("finish_reason") == "length",
                       "final finish_reason");
     failures += check(final_chunk.at("choices").at(0).at("delta").empty(), "final delta empty");
     failures += check(final_chunk.contains("usage") && final_chunk.at("usage").is_null(),
                       "final usage null (stats live on dedicated chunk)");
+    failures += check(final_chunk.at("timings").at("predicted_n") == 3,
+                      "timings carried on final chunk");
 
-    const Json final_no_usage = parse_sse(make_chat_chunk_final("id", "m", 1, "stop", false));
+    const Json final_no_usage = parse_sse(make_chat_chunk_final("id", "m", 1, "stop", false,
+                                                                nullptr));
     failures += check(!final_no_usage.contains("usage"), "no usage key when include_usage=false");
+    failures +=
+        check(!final_no_usage.contains("timings"), "no timings when not provided");
 
-    // Dedicated usage chunk: empty choices, populated usage.
-    const CompletionUsage usage{2, 5};
+    // Dedicated usage chunk: empty choices, populated usage incl. cached details.
+    const CompletionUsage usage{2, 5, 1};
     const Json usage_chunk = parse_sse(make_chat_chunk_usage("id", "m", 1, usage));
     failures += check(usage_chunk.at("choices").is_array() && usage_chunk.at("choices").empty(),
                       "usage chunk has empty choices");
     failures +=
         check(usage_chunk.at("usage").at("prompt_tokens") == 2, "usage chunk prompt_tokens");
     failures += check(usage_chunk.at("usage").at("total_tokens") == 7, "usage chunk total");
+    failures += check(usage_chunk.at("usage").at("prompt_tokens_details").at("cached_tokens") == 1,
+                      "usage chunk cached_tokens");
 
     failures += check(sse_done() == "data: [DONE]\n\n", "done sentinel");
     return failures;
@@ -661,7 +703,8 @@ int test_tool_chunk_serialization() {
     failures +=
         check(chunk.contains("usage") && chunk.at("usage").is_null(), "tool chunk usage null");
 
-    const Json final_chunk = parse_sse(make_chat_chunk_final("id", "m", 1, "tool_calls", true));
+    const Json final_chunk = parse_sse(make_chat_chunk_final("id", "m", 1, "tool_calls", true,
+                                                             nullptr));
     failures += check(final_chunk.at("choices").at(0).at("finish_reason") == "tool_calls",
                       "tool final finish reason");
     return failures;

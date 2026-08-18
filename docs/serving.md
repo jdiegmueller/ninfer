@@ -114,6 +114,11 @@ Streaming begins with an assistant-role chunk, sends separate reasoning and cont
 finish-reason chunk and `[DONE]`. When `stream_options.include_usage` is true, a final empty
 `choices` chunk contains completed usage.
 
+Every completed generation also returns the per-request [wire statistics](#per-request-wire-statistics)
+block: in the response body next to `usage` for non-streaming requests, and on the final
+finish-reason chunk for streams (independent of `stream_options.include_usage`). `usage` carries
+`prompt_tokens_details.cached_tokens` whenever the request reused a resident prompt prefix.
+
 ### Multimodal request
 
 Start the server with `--vision` before sending media:
@@ -423,6 +428,11 @@ an effort with `thinking.type: "disabled"` is rejected as contradictory.
 
 Anthropic's `model` field is treated as a response label and does not select the loaded artifact.
 
+Every completed generation also returns the per-request [wire statistics](#per-request-wire-statistics)
+block: in the response body next to `usage` for non-streaming requests, and on the terminal
+`message_delta` event for streams. `usage` additionally reports `cache_read_input_tokens`, the
+resident prompt prefix reused by the request (zero when nothing was reused).
+
 `POST /v1/messages/count_tokens` uses the artifact's tokenizer, chat template, and media expansion
 without running GPU generation:
 
@@ -434,6 +444,49 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
     "messages": [{"role": "user", "content": "Count this prompt."}]
   }'
 ```
+
+## Per-request wire statistics
+
+Every completed generation returns a `timings` object alongside the response `usage`. The field
+layout is the llama-server-compatible shape that llama.cpp serves next to its OpenAI-compatible
+responses, so frontends that parse it (e.g. llama-swap's activity metrics) ingest the statistics
+without backend-specific handling:
+
+```json
+{
+  "prompt_ms": 12.5,
+  "prompt_n": 4187,
+  "prompt_per_second": 334960.0,
+  "predicted_ms": 412.5,
+  "predicted_n": 256,
+  "predicted_per_second": 620.6,
+  "cache_n": 4096,
+  "draft_n": 766,
+  "draft_n_accepted": 654
+}
+```
+
+`prompt_n` and `predicted_n` are the full input and accepted output token counts; `cache_n` is the
+resident prompt prefix reused by the request. `prompt_ms` and `prompt_per_second` cover the
+computed suffix only (input tokens minus `cache_n`) over the prefill phase, and `predicted_ms` and
+`predicted_per_second` are the committed output tokens over the decode phase. Both rates are the
+same per-request measurement that `request_done.timings_seconds` records in the structured request
+log, expressed in the wire block's llama-server field names; media-preprocessing and acquisition
+time are not included. `draft_n` and `draft_n_accepted` (speculative tokens drafted / accepted)
+are present only when a speculative backend executed the request.
+
+Placement on the wire:
+
+- OpenAI Chat Completions: top-level in the non-streaming body; on the final finish-reason chunk
+  of a stream, so statistics arrive whether or not `stream_options.include_usage` is set;
+- Anthropic Messages: top-level in the non-streaming body; on the terminal `message_delta` event;
+- OpenAI Responses: a member of the terminal response object, which the terminal SSE event
+  (`response.completed` / `response.incomplete` / `response.cancelled`) also repeats at the top
+  level of the event payload for stream parsers. The stored terminal response served by
+  `GET /v1/responses/{id}` carries it as well.
+
+The block reports only completed generations; rejected, errored, and cancelled requests carry no
+`timings`.
 
 ## Authentication and CORS
 
@@ -529,7 +582,9 @@ they do not infer request behavior from process-global counter deltas.
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
 `drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
-derived downstream from raw token counts and seconds instead of rounded stderr strings.
+derived downstream from raw token counts and seconds instead of rounded stderr strings. The same
+per-request measurement is exposed on the wire as the `timings` block documented in
+[Per-request wire statistics](#per-request-wire-statistics).
 
 The JSONL file contains no generated response text and never records an API-key value; `argv`
 replaces that value with `<redacted>`. The existing stderr summaries remain available for operators
