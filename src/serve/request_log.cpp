@@ -429,6 +429,14 @@ std::string format_throughput(const ThroughputReport& report) {
             << static_cast<double>(report.decode_row_rounds) /
                    static_cast<double>(report.decode_rounds);
     }
+    if (report.scheduler.staged_prefill_tokens_total != 0) {
+        const double percent =
+            100.0 * static_cast<double>(report.scheduler.staged_prefill_tokens_done) /
+            static_cast<double>(report.scheduler.staged_prefill_tokens_total);
+        out << " prefill_progress=" << report.scheduler.staged_prefill_tokens_done << '/'
+            << report.scheduler.staged_prefill_tokens_total << " (" << std::setprecision(1)
+            << percent << "%)";
+    }
     return out.str();
 }
 
@@ -591,10 +599,16 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
                                       {"committed_decode", report.committed_decode_tokens}};
     record["throughput_tokens_per_second"] =
         Json{{"prefill", prefill_rate}, {"decode", decode_rate}};
-    record["scheduler"]    = Json{{"running", report.scheduler.running_requests},
-                                  {"prefilling", report.scheduler.prefilling_requests},
-                                  {"decode_ready", report.scheduler.decode_ready_requests},
-                                  {"waiting", report.scheduler.waiting_requests}};
+    Json staged_prefill = nullptr;
+    if (report.scheduler.staged_prefill_tokens_total != 0) {
+        staged_prefill = Json{{"done", report.scheduler.staged_prefill_tokens_done},
+                              {"total", report.scheduler.staged_prefill_tokens_total}};
+    }
+    record["scheduler"] = Json{{"running", report.scheduler.running_requests},
+                               {"prefilling", report.scheduler.prefilling_requests},
+                               {"decode_ready", report.scheduler.decode_ready_requests},
+                               {"waiting", report.scheduler.waiting_requests},
+                               {"staged_prefill", std::move(staged_prefill)}};
     record["decode_batch"] = Json{{"rounds", report.decode_rounds},
                                   {"row_rounds", report.decode_row_rounds},
                                   {"average_size", std::move(average_batch)}};

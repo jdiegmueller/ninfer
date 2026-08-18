@@ -325,11 +325,16 @@ int main() {
     throughput.scheduler.prefilling_requests   = 1;
     throughput.scheduler.decode_ready_requests = 1;
     throughput.scheduler.waiting_requests      = 3;
+    throughput.scheduler.staged_prefill_tokens_done  = 1024;
+    throughput.scheduler.staged_prefill_tokens_total = 8192;
     const std::string human_throughput         = format_throughput(throughput);
     failures += check(human_throughput.find("prefill=50.0tok/s") != std::string::npos &&
                           human_throughput.find("decode=20.0tok/s") != std::string::npos &&
                           human_throughput.find("avg_decode_batch=1.80") != std::string::npos,
                       "human throughput report mismatch");
+    failures += check(
+        human_throughput.find("prefill_progress=1024/8192 (12.5%)") != std::string::npos,
+        "human throughput report omits staged prefill progress");
     const Json throughput_json =
         Json::parse(format_throughput_json("serve-test", 5000, throughput));
     failures += check(throughput_json.at("event") == "throughput", "throughput event mismatch");
@@ -338,6 +343,19 @@ int main() {
                       "throughput token deltas mismatch");
     failures += check(throughput_json.at("decode_batch").at("average_size") == 1.8,
                       "throughput batch average mismatch");
+    failures += check(throughput_json.at("scheduler").at("staged_prefill").at("done") == 1024 &&
+                          throughput_json.at("scheduler").at("staged_prefill").at("total") == 8192,
+                      "throughput staged prefill progress missing");
+
+    ThroughputReport idle;
+    idle.interval_seconds        = 1.0;
+    idle.scheduler.running_requests = 1;
+    const std::string human_idle = format_throughput(idle);
+    failures += check(human_idle.find("prefill_progress") == std::string::npos,
+                      "human throughput report shows prefill progress without a staged prefill");
+    const Json idle_json = Json::parse(format_throughput_json("serve-test", 5100, idle));
+    failures += check(idle_json.at("scheduler").at("staged_prefill").is_null(),
+                      "idle throughput record must null the staged prefill object");
 
     const std::string console_prefix =
         format_console_log_prefix(std::chrono::system_clock::time_point{}, ConsoleLogLevel::Info);

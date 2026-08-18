@@ -448,6 +448,10 @@ struct RuntimeStats {
     std::uint32_t prefilling_requests   = 0;
     std::uint32_t decode_ready_requests = 0;
     std::uint32_t waiting_requests      = 0;
+    // Staged prefill progress of the request owning the prefill lane; both are zero when no
+    // request is being prefilled.
+    std::uint32_t staged_prefill_tokens_done   = 0;
+    std::uint32_t staged_prefill_tokens_total  = 0;
 };
 
 struct LoadSummary {

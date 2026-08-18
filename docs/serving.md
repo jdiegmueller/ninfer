@@ -564,7 +564,7 @@ is also rejected if it resolves to the model artifact.
   --request-log-jsonl profiles/bench/run/server.requests.jsonl
 ```
 
-Every line is one `ninfer_serve_request_log` schema-v10 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v11 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -577,7 +577,7 @@ they do not infer request behavior from process-global counter deltas.
 | `request_rejected` | parsed request shape, media-item count, `phase: "prepare"`, and the exact HTTP status/type/code/parameter/message for a synchronous preparation rejection |
 | `request_done` | finish reason, prompt/completion/cache/computed-prefill tokens, prefix reuse path, unrounded phase seconds, and complete speculative-decoding counters |
 | `request_error` | the resolved request configuration and generation error message |
-| `throughput` | interval token deltas and rates, scheduler occupancy, and decode-round batch statistics |
+| `throughput` | interval token deltas and rates, scheduler occupancy including staged-prefill progress, and decode-round batch statistics |
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
@@ -602,7 +602,11 @@ tokens finally committed by decode rounds, excluding the first token produced by
 and DFlash this is the accepted committed output, not draft or rejected tokens.
 `avg_decode_batch` is decode row-rounds divided by decode rounds during the same interval. The
 `running`, `prefilling`, `decode_ready`, and `waiting` fields are the Engine scheduler snapshot at
-the end of the interval. Fully idle zero intervals are omitted. The JSONL `throughput` event keeps
+the end of the interval. When that snapshot carries a staged prefill, the report also shows
+`prefill_progress` as the prompt-suffix tokens already computed for that request over the total it
+must compute, for example `prefill_progress=1024/8192 (12.5%)`; the JSONL equivalent is
+`scheduler.staged_prefill` with `done`/`total`, or `null` when nothing is being prefilled. Fully
+idle zero intervals are omitted. The JSONL `throughput` event keeps
 the raw token and round deltas as well as derived rates; downstream measurement should prefer those
 raw values.
 

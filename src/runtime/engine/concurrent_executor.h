@@ -206,6 +206,13 @@ private:
             snapshot.waiting_requests = static_cast<std::uint32_t>(pending_.size());
         }
         snapshot.prefilling_requests = prefill_lane_.has_value() ? 1U : 0U;
+        if (prefill_lane_) {
+            const std::shared_ptr<Request>& staged = slots_[*prefill_lane_];
+            if (staged != nullptr) {
+                snapshot.staged_prefill_tokens_done  = staged->staged_prefill_tokens_done;
+                snapshot.staged_prefill_tokens_total = staged->staged_prefill_tokens_total;
+            }
+        }
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             if (slots_[lane] == nullptr) { continue; }
             ++snapshot.running_requests;
@@ -294,6 +301,8 @@ private:
         std::optional<std::uint32_t> lane;
         std::atomic<bool> cancelled{false};
         bool decode_ready = false;
+        std::uint32_t staged_prefill_tokens_done  = 0;
+        std::uint32_t staged_prefill_tokens_total = 0;
 
         std::optional<BasePlan> base_plan;
         std::array<std::optional<Plan>, kMaximumConcurrency> lane_plans{};
@@ -613,6 +622,7 @@ private:
     void resolve_prefill_step(const std::shared_ptr<Request>& request,
                               const PrefillStepResult& step, bool cancel_at_boundary) {
         cumulative_stats_.computed_prefill_tokens += step.processed_prompt_tokens;
+        request->staged_prefill_tokens_done += step.processed_prompt_tokens;
         consume_service_work(request, 1);
         if (cancel_at_boundary) {
             if (!request->lane) { throw std::logic_error("cancelled prefill has no request lane"); }
@@ -793,6 +803,8 @@ private:
         clear_protection_if_head(request);
 
         const bool needs_prefill = summary.reusable_prompt_tokens < summary.prompt_tokens;
+        request->staged_prefill_tokens_total =
+            summary.prompt_tokens - summary.reusable_prompt_tokens;
         bool target_started      = false;
         try {
             request->budget.emplace(summary.effective_output_tokens,
