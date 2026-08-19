@@ -77,6 +77,10 @@ struct ThroughputReport {
     std::uint64_t decode_rounds           = 0;
     std::uint64_t decode_row_rounds       = 0;
     ninfer::RuntimeStats scheduler;
+    // Best-effort remaining time for the in-flight staged prefill, estimated from the two
+    // consecutive Engine samples that produced this report. Absent when the samples cannot be
+    // attributed to the same prefill or the window completed no prefill tokens.
+    std::optional<double> staged_prefill_eta_seconds;
 };
 
 RequestLogContext make_request_log_context(std::uint64_t id, std::string protocol,
@@ -93,6 +97,13 @@ std::string format_request_rejected(const RequestRejectionLogContext& context);
 std::string format_request_done(const RequestLogContext& context, const GenerationOutcome& outcome);
 std::string format_request_error(const RequestLogContext& context, const std::string& message);
 std::string format_throughput(const ThroughputReport& report);
+
+// Best-effort estimate of the remaining staged-prefill time from two consecutive Engine samples.
+// Returns nullopt when the samples do not refer to the same in-flight prefill or the window
+// completed no prefill tokens.
+std::optional<double> estimate_staged_prefill_eta_seconds(const ninfer::RuntimeStats& previous,
+                                                          const ninfer::RuntimeStats& current,
+                                                          double interval_seconds);
 
 // Pure JSON formatters are public to repository tests. Each return value is one complete JSON
 // object without a trailing newline.

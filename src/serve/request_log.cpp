@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
@@ -406,6 +407,31 @@ std::string format_request_error(const RequestLogContext& context, const std::st
     return out.str();
 }
 
+std::optional<double> estimate_staged_prefill_eta_seconds(const ninfer::RuntimeStats& previous,
+                                                          const ninfer::RuntimeStats& current,
+                                                          double interval_seconds) {
+    const std::uint32_t total = current.staged_prefill_tokens_total;
+    const std::uint32_t done  = current.staged_prefill_tokens_done;
+    if (interval_seconds <= 0.0 || total == 0 || done == total) {
+        return std::nullopt;
+    }
+    // The Engine runs at most one staged prefill at a time; its total is fixed at admission and
+    // its done count advances monotonically until the prefill completes. Both samples carrying the
+    // same total with a non-regressed done count attribute the delta to one in-flight prefill;
+    // otherwise the window spans a prefill boundary and no estimate is produced.
+    if (previous.staged_prefill_tokens_total != total ||
+        previous.staged_prefill_tokens_done > done) {
+        return std::nullopt;
+    }
+    const std::uint64_t completed =
+        static_cast<std::uint64_t>(done) - previous.staged_prefill_tokens_done;
+    if (completed == 0) {
+        return std::nullopt;
+    }
+    const double rate = static_cast<double>(completed) / interval_seconds;
+    return static_cast<double>(total - done) / rate;
+}
+
 std::string format_throughput(const ThroughputReport& report) {
     const double prefill_rate =
         report.interval_seconds > 0.0
@@ -436,6 +462,11 @@ std::string format_throughput(const ThroughputReport& report) {
         out << " prefill_progress=" << report.scheduler.staged_prefill_tokens_done << '/'
             << report.scheduler.staged_prefill_tokens_total << " (" << std::setprecision(1)
             << percent << "%)";
+        if (report.staged_prefill_eta_seconds.has_value()) {
+            const std::int64_t eta_seconds =
+                std::max<std::int64_t>(1, std::llround(*report.staged_prefill_eta_seconds));
+            out << " prefill_eta_s=" << eta_seconds;
+        }
     }
     return out.str();
 }

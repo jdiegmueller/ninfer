@@ -86,6 +86,8 @@ ThroughputReport make_throughput_report(const ninfer::RuntimeStats& previous,
         .decode_rounds     = current.decode_rounds - previous.decode_rounds,
         .decode_row_rounds = current.decode_row_rounds - previous.decode_row_rounds,
         .scheduler         = current,
+        .staged_prefill_eta_seconds =
+            estimate_staged_prefill_eta_seconds(previous, current, interval_seconds),
     };
 }
 

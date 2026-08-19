@@ -327,14 +327,16 @@ int main() {
     throughput.scheduler.waiting_requests      = 3;
     throughput.scheduler.staged_prefill_tokens_done  = 1024;
     throughput.scheduler.staged_prefill_tokens_total = 8192;
+    throughput.staged_prefill_eta_seconds            = 4.0;
     const std::string human_throughput         = format_throughput(throughput);
     failures += check(human_throughput.find("prefill=50.0tok/s") != std::string::npos &&
                           human_throughput.find("decode=20.0tok/s") != std::string::npos &&
                           human_throughput.find("avg_decode_batch=1.80") != std::string::npos,
                       "human throughput report mismatch");
     failures += check(
-        human_throughput.find("prefill_progress=1024/8192 (12.5%)") != std::string::npos,
-        "human throughput report omits staged prefill progress");
+        human_throughput.find("prefill_progress=1024/8192 (12.5%) prefill_eta_s=4") !=
+            std::string::npos,
+        "human throughput report omits staged prefill progress and ETA");
     const Json throughput_json =
         Json::parse(format_throughput_json("serve-test", 5000, throughput));
     failures += check(throughput_json.at("event") == "throughput", "throughput event mismatch");
@@ -347,11 +349,67 @@ int main() {
                           throughput_json.at("scheduler").at("staged_prefill").at("total") == 8192,
                       "throughput staged prefill progress missing");
 
+    // Staged prefill ETA estimator: one in-flight prefill gives a rate from the interval delta.
+    {
+        ninfer::RuntimeStats prev, cur;
+        prev.staged_prefill_tokens_done  = 512;
+        prev.staged_prefill_tokens_total = 2048;
+        cur.staged_prefill_tokens_done   = 1024;
+        cur.staged_prefill_tokens_total  = 2048;
+        const std::optional<double> eta  = estimate_staged_prefill_eta_seconds(prev, cur, 2.0);
+        failures += check(eta.has_value() && *eta == 4.0, "staged prefill ETA estimate mismatch");
+    }
+    {
+        // The window spans an admission boundary (different total): no usable delta.
+        ninfer::RuntimeStats prev, cur;
+        prev.staged_prefill_tokens_done  = 512;
+        prev.staged_prefill_tokens_total = 2048;
+        cur.staged_prefill_tokens_done   = 1024;
+        cur.staged_prefill_tokens_total  = 4096;
+        failures += check(
+            !estimate_staged_prefill_eta_seconds(prev, cur, 2.0).has_value(),
+            "staged prefill ETA estimate across an admission boundary");
+    }
+    {
+        // The previous prefill completed and a same-sized one started (done regressed).
+        ninfer::RuntimeStats prev, cur;
+        prev.staged_prefill_tokens_done  = 2048;
+        prev.staged_prefill_tokens_total = 2048;
+        cur.staged_prefill_tokens_done   = 0;
+        cur.staged_prefill_tokens_total  = 2048;
+        failures += check(
+            !estimate_staged_prefill_eta_seconds(prev, cur, 2.0).has_value(),
+            "staged prefill ETA estimate across a prefill completion");
+    }
+    {
+        // No prefill tokens completed inside the window: no rate.
+        ninfer::RuntimeStats prev, cur;
+        prev.staged_prefill_tokens_done  = 1024;
+        prev.staged_prefill_tokens_total = 2048;
+        cur.staged_prefill_tokens_done   = 1024;
+        cur.staged_prefill_tokens_total  = 2048;
+        failures += check(
+            !estimate_staged_prefill_eta_seconds(prev, cur, 2.0).has_value(),
+            "staged prefill ETA estimate with an empty window");
+    }
+    {
+        // The prefill finished inside the window: nothing left to estimate.
+        ninfer::RuntimeStats prev, cur;
+        prev.staged_prefill_tokens_done  = 1024;
+        prev.staged_prefill_tokens_total = 2048;
+        cur.staged_prefill_tokens_done   = 2048;
+        cur.staged_prefill_tokens_total  = 2048;
+        failures += check(
+            !estimate_staged_prefill_eta_seconds(prev, cur, 2.0).has_value(),
+            "staged prefill ETA estimate for a completed prefill");
+    }
+
     ThroughputReport idle;
     idle.interval_seconds        = 1.0;
     idle.scheduler.running_requests = 1;
     const std::string human_idle = format_throughput(idle);
-    failures += check(human_idle.find("prefill_progress") == std::string::npos,
+    failures += check(human_idle.find("prefill_progress") == std::string::npos &&
+                          human_idle.find("prefill_eta_s") == std::string::npos,
                       "human throughput report shows prefill progress without a staged prefill");
     const Json idle_json = Json::parse(format_throughput_json("serve-test", 5100, idle));
     failures += check(idle_json.at("scheduler").at("staged_prefill").is_null(),
