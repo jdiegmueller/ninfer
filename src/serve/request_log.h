@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <mutex>
 #include <optional>
@@ -98,12 +99,29 @@ std::string format_request_done(const RequestLogContext& context, const Generati
 std::string format_request_error(const RequestLogContext& context, const std::string& message);
 std::string format_throughput(const ThroughputReport& report);
 
-// Best-effort estimate of the remaining staged-prefill time from two consecutive Engine samples.
-// Returns nullopt when the samples do not refer to the same in-flight prefill or the window
-// completed no prefill tokens.
-std::optional<double> estimate_staged_prefill_eta_seconds(const ninfer::RuntimeStats& previous,
-                                                          const ninfer::RuntimeStats& current,
-                                                          double interval_seconds);
+// Damps the per-interval prefill rate into a stable remaining-time estimate. The Engine runs at
+// most one staged prefill at a time; the filter integrates the tokens that prefill completed
+// over the shorter of a trailing six-second window or its observed lifetime, and resets when
+// the samples stop referring to that prefill (a new admission, a completion, or an idle gap).
+// Single-threaded: feed one sample per stats interval.
+class StagedPrefillEtaFilter {
+public:
+    // Feeds one Engine sample taken at `timestamp_seconds` (any monotonic clock, seconds) and
+    // returns the current remaining prefill time in seconds, or nullopt when no usable rate
+    // exists (first samples of a prefill, a prefill boundary, a window with no completed
+    // tokens, or a finished prefill).
+    std::optional<double> update(double timestamp_seconds, const ninfer::RuntimeStats& sample);
+
+private:
+    struct Sample {
+        double timestamp_seconds;
+        std::uint32_t done;
+    };
+
+    std::deque<Sample> samples_;  // head is the first observation of the current prefill
+    std::uint32_t prefill_total_  = 0;
+    bool have_prefill_            = false;
+};
 
 // Pure JSON formatters are public to repository tests. Each return value is one complete JSON
 // object without a trailing newline.

@@ -86,8 +86,6 @@ ThroughputReport make_throughput_report(const ninfer::RuntimeStats& previous,
         .decode_rounds     = current.decode_rounds - previous.decode_rounds,
         .decode_row_rounds = current.decode_row_rounds - previous.decode_row_rounds,
         .scheduler         = current,
-        .staged_prefill_eta_seconds =
-            estimate_staged_prefill_eta_seconds(previous, current, interval_seconds),
     };
 }
 
@@ -172,10 +170,20 @@ void HttpServer::log_throughput(const ThroughputReport& report) {
 }
 
 void HttpServer::run_stats_reporter() {
-    using Clock                     = std::chrono::steady_clock;
-    ninfer::RuntimeStats previous   = service_->runtime_stats();
-    Clock::time_point previous_time = Clock::now();
-    const auto interval             = std::chrono::milliseconds(options_.log_stats_interval_ms);
+    using Clock                        = std::chrono::steady_clock;
+    ninfer::RuntimeStats previous      = service_->runtime_stats();
+    Clock::time_point previous_time    = Clock::now();
+    const Clock::time_point start_time = previous_time;
+    const auto interval                = std::chrono::milliseconds(options_.log_stats_interval_ms);
+    StagedPrefillEtaFilter prefill_eta;
+
+    // Tags the report with the damped remaining-prefill estimate. The filter is fed on every
+    // sample (including silent ones) so its window stays current across quiet intervals.
+    auto tag_prefill_eta = [&](ThroughputReport& report, const ninfer::RuntimeStats& sample,
+                               const Clock::time_point& at) {
+        report.staged_prefill_eta_seconds =
+            prefill_eta.update(std::chrono::duration<double>(at - start_time).count(), sample);
+    };
 
     for (;;) {
         {
@@ -185,8 +193,9 @@ void HttpServer::run_stats_reporter() {
 
         const ninfer::RuntimeStats current = service_->runtime_stats();
         const Clock::time_point now        = Clock::now();
-        const ThroughputReport report      = make_throughput_report(
+        ThroughputReport report            = make_throughput_report(
             previous, current, std::chrono::duration<double>(now - previous_time).count());
+        tag_prefill_eta(report, current, now);
         if (report_has_activity(report)) { log_throughput(report); }
         previous      = current;
         previous_time = now;
@@ -194,8 +203,9 @@ void HttpServer::run_stats_reporter() {
 
     const ninfer::RuntimeStats current = service_->runtime_stats();
     const Clock::time_point now        = Clock::now();
-    const ThroughputReport tail        = make_throughput_report(
+    ThroughputReport tail              = make_throughput_report(
         previous, current, std::chrono::duration<double>(now - previous_time).count());
+    tag_prefill_eta(tail, current, now);
     if (tail.computed_prefill_tokens != 0 || tail.committed_decode_tokens != 0 ||
         tail.decode_rounds != 0) {
         log_throughput(tail);

@@ -407,28 +407,53 @@ std::string format_request_error(const RequestLogContext& context, const std::st
     return out.str();
 }
 
-std::optional<double> estimate_staged_prefill_eta_seconds(const ninfer::RuntimeStats& previous,
-                                                          const ninfer::RuntimeStats& current,
-                                                          double interval_seconds) {
-    const std::uint32_t total = current.staged_prefill_tokens_total;
-    const std::uint32_t done  = current.staged_prefill_tokens_done;
-    if (interval_seconds <= 0.0 || total == 0 || done == total) {
+std::optional<double> StagedPrefillEtaFilter::update(double timestamp_seconds,
+                                                     const ninfer::RuntimeStats& sample) {
+    const std::uint32_t total = sample.staged_prefill_tokens_total;
+    const std::uint32_t done  = sample.staged_prefill_tokens_done;
+    const bool same_prefill = have_prefill_ && total == prefill_total_ &&
+                              done >= samples_.back().done;
+    if (!same_prefill) {
+        // No in-flight prefill, or the samples crossed a prefill boundary (a new admission,
+        // a completion followed by a same-sized restart, or an idle gap): start a fresh
+        // series at this sample. Its first sample has no span to measure a rate from.
+        samples_.clear();
+        if (total == 0) {
+            have_prefill_  = false;
+            prefill_total_ = 0;
+            return std::nullopt;
+        }
+        have_prefill_  = true;
+        prefill_total_ = total;
+        samples_.push_back({timestamp_seconds, done});
         return std::nullopt;
     }
-    // The Engine runs at most one staged prefill at a time; its total is fixed at admission and
-    // its done count advances monotonically until the prefill completes. Both samples carrying the
-    // same total with a non-regressed done count attribute the delta to one in-flight prefill;
-    // otherwise the window spans a prefill boundary and no estimate is produced.
-    if (previous.staged_prefill_tokens_total != total ||
-        previous.staged_prefill_tokens_done > done) {
-        return std::nullopt;
+    samples_.push_back({timestamp_seconds, done});
+    if (done == total) {
+        return std::nullopt;  // finished: nothing left to estimate
     }
-    const std::uint64_t completed =
-        static_cast<std::uint64_t>(done) - previous.staged_prefill_tokens_done;
-    if (completed == 0) {
-        return std::nullopt;
+    // Integrate over the shorter of the trailing window or the prefill's observed lifetime. The
+    // series head is retained: young prefills average over everything seen so far, which damps
+    // the per-chunk rate quantization (an interval completes an integer number of prefill
+    // chunks) while a sustained mid-prefill rate change still shows up within the window. The
+    // span is six seconds so that, at the default one-second stats cadence, it holds a whole
+    // even number of intervals: the common two/three-chunk-per-interval pattern then contains
+    // a balanced mix in every window and cannot make the estimate alternate.
+    constexpr double kWindowSeconds = 6.0;
+    const Sample& first = samples_.front();
+    const double window_start = std::max(first.timestamp_seconds,
+                                         timestamp_seconds - kWindowSeconds);
+    std::size_t oldest = 0;
+    while (oldest + 1 < samples_.size() && samples_[oldest].timestamp_seconds < window_start) {
+        ++oldest;
     }
-    const double rate = static_cast<double>(completed) / interval_seconds;
+    const Sample& span_start = samples_[oldest];
+    const double span_seconds = timestamp_seconds - span_start.timestamp_seconds;
+    const std::uint64_t span_done = static_cast<std::uint64_t>(done) - span_start.done;
+    if (span_seconds <= 0.0 || span_done == 0) {
+        return std::nullopt;  // no tokens completed inside the span (e.g. a blocked prefill)
+    }
+    const double rate = static_cast<double>(span_done) / span_seconds;
     return static_cast<double>(total - done) / rate;
 }
 

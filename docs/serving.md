@@ -604,11 +604,12 @@ and DFlash this is the accepted committed output, not draft or rejected tokens.
 `running`, `prefilling`, `decode_ready`, and `waiting` fields are the Engine scheduler snapshot at
 the end of the interval. When that snapshot carries a staged prefill, the report also shows
 `prefill_progress` as the prompt-suffix tokens already computed for that request over the total it
-must compute, for example `prefill_progress=1024/8192 (12.5%) prefill_eta_s=4`. `prefill_eta_s` is
-a best-effort estimate of the remaining prefill time from the tokens that prefill completed during
-the previous interval; it is omitted when that interval has no usable delta for the prefill
-(shown on its first sample, when a prefill boundary falls inside the interval, or once the
-prefill has completed). The JSONL equivalent of the progress is
+must compute, for example `prefill_progress=1024/8192 (12.5%) prefill_eta_s=4`. `prefill_eta_s`
+is a best-effort estimate of the remaining prefill time, averaged over the shorter of the trailing
+six seconds or the prefill's lifetime so per-chunk rate quantization cannot make it jump;
+it is omitted while no usable window exists (the prefill's first samples, a prefill boundary,
+a window in which it completed no tokens, or once the prefill has completed). The JSONL
+equivalent of the progress is
 `scheduler.staged_prefill` with `done`/`total`, or `null` when nothing is being prefilled. Fully
 idle zero intervals are omitted. The JSONL `throughput` event keeps
 the raw token and round deltas as well as derived rates; downstream measurement should prefer those

@@ -3,6 +3,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -349,59 +351,115 @@ int main() {
                           throughput_json.at("scheduler").at("staged_prefill").at("total") == 8192,
                       "throughput staged prefill progress missing");
 
-    // Staged prefill ETA estimator: one in-flight prefill gives a rate from the interval delta.
+    // Staged prefill ETA filter: per-chunk rate quantization (each interval completes a whole
+    // number of prefill chunks) must not make the estimate jump between intervals.
     {
-        ninfer::RuntimeStats prev, cur;
-        prev.staged_prefill_tokens_done  = 512;
-        prev.staged_prefill_tokens_total = 2048;
-        cur.staged_prefill_tokens_done   = 1024;
-        cur.staged_prefill_tokens_total  = 2048;
-        const std::optional<double> eta  = estimate_staged_prefill_eta_seconds(prev, cur, 2.0);
-        failures += check(eta.has_value() && *eta == 4.0, "staged prefill ETA estimate mismatch");
+        StagedPrefillEtaFilter filter;
+        ninfer::RuntimeStats sample;
+        sample.staged_prefill_tokens_total = 91896;
+        std::uint32_t done     = 0;
+        double previous_eta    = 0.0;
+        double max_step        = 0.0;
+        for (std::uint32_t second = 1; second <= 30; ++second) {
+            done += (second % 2 == 1) ? 3072U : 2048U;  // the 2/3-chunk-per-interval pattern
+            sample.staged_prefill_tokens_done = done;
+            const std::optional<double> eta = filter.update(double(second), sample);
+            if (second == 1) {
+                failures += check(!eta.has_value(),
+                                  "ETA filter estimates on a prefill's first sample");
+                continue;
+            }
+            failures += check(eta.has_value(), "ETA filter drops a usable prefill window");
+            if (second >= 8) {  // the 6 s window is full and past its fill-in transition
+                max_step = std::max(max_step, std::abs(*eta - previous_eta));
+            }
+            previous_eta = *eta;
+        }
+        std::string swing = "ETA filter swings " + std::to_string(max_step) + "s between intervals";
+        failures += check(max_step < 2.0, swing.c_str());
+        failures += check(previous_eta > 5.0 && previous_eta < 7.0,
+                          "ETA filter converges away from the average prefill rate");
     }
     {
-        // The window spans an admission boundary (different total): no usable delta.
-        ninfer::RuntimeStats prev, cur;
-        prev.staged_prefill_tokens_done  = 512;
-        prev.staged_prefill_tokens_total = 2048;
-        cur.staged_prefill_tokens_done   = 1024;
-        cur.staged_prefill_tokens_total  = 4096;
-        failures += check(
-            !estimate_staged_prefill_eta_seconds(prev, cur, 2.0).has_value(),
-            "staged prefill ETA estimate across an admission boundary");
+        // A prefill boundary starts a fresh series: the new prefill's rate is not contaminated
+        // by the one that finished.
+        StagedPrefillEtaFilter filter;
+        ninfer::RuntimeStats a;
+        a.staged_prefill_tokens_total = 2048;
+        a.staged_prefill_tokens_done  = 0;
+        (void)filter.update(0.0, a);
+        a.staged_prefill_tokens_done = 2048;
+        (void)filter.update(1.0, a);  // prefill a finished
+        ninfer::RuntimeStats b;
+        b.staged_prefill_tokens_total = 4096;
+        b.staged_prefill_tokens_done  = 1024;
+        failures += check(!filter.update(2.0, b).has_value(),
+                          "ETA filter estimates across a prefill admission");
+        b.staged_prefill_tokens_done = 2048;
+        const std::optional<double> eta = filter.update(3.0, b);
+        failures += check(eta.has_value() && std::abs(*eta - 2.0) < 0.01,
+                          "ETA filter reuses the previous prefill's rate");
     }
     {
-        // The previous prefill completed and a same-sized one started (done regressed).
-        ninfer::RuntimeStats prev, cur;
-        prev.staged_prefill_tokens_done  = 2048;
-        prev.staged_prefill_tokens_total = 2048;
-        cur.staged_prefill_tokens_done   = 0;
-        cur.staged_prefill_tokens_total  = 2048;
-        failures += check(
-            !estimate_staged_prefill_eta_seconds(prev, cur, 2.0).has_value(),
-            "staged prefill ETA estimate across a prefill completion");
+        // A completion followed by a same-sized restart: done regresses, so the series resets.
+        StagedPrefillEtaFilter filter;
+        ninfer::RuntimeStats s;
+        s.staged_prefill_tokens_total = 2048;
+        s.staged_prefill_tokens_done  = 0;
+        (void)filter.update(0.0, s);
+        s.staged_prefill_tokens_done = 1024;
+        (void)filter.update(1.0, s);
+        s.staged_prefill_tokens_done = 2048;
+        failures += check(!filter.update(2.0, s).has_value(),
+                          "ETA filter estimates a completed prefill");
+        s.staged_prefill_tokens_done = 0;  // a same-sized prefill restarts
+        failures += check(!filter.update(3.0, s).has_value(),
+                          "ETA filter tracks a completed prefill across a restart");
+        s.staged_prefill_tokens_done = 1024;
+        const std::optional<double> early = filter.update(4.0, s);
+        failures += check(early.has_value() && std::abs(*early - 1.0) < 0.01,
+                          "ETA filter restart's first window mismatch");
+        s.staged_prefill_tokens_done = 1536;
+        const std::optional<double> eta = filter.update(5.0, s);
+        failures += check(eta.has_value() &&
+                              std::abs(*eta - (2048.0 - 1536.0) / (1536.0 / 2.0)) < 0.01,
+                          "ETA filter restart window rate mismatch");
     }
     {
-        // No prefill tokens completed inside the window: no rate.
-        ninfer::RuntimeStats prev, cur;
-        prev.staged_prefill_tokens_done  = 1024;
-        prev.staged_prefill_tokens_total = 2048;
-        cur.staged_prefill_tokens_done   = 1024;
-        cur.staged_prefill_tokens_total  = 2048;
-        failures += check(
-            !estimate_staged_prefill_eta_seconds(prev, cur, 2.0).has_value(),
-            "staged prefill ETA estimate with an empty window");
+        // A window in which no tokens complete (a blocked prefill) suppresses the estimate until
+        // tokens flow again; the rate then covers the whole trailing window.
+        StagedPrefillEtaFilter filter;
+        ninfer::RuntimeStats s;
+        s.staged_prefill_tokens_total = 4096;
+        s.staged_prefill_tokens_done  = 1024;
+        (void)filter.update(0.0, s);
+        for (std::uint32_t second = 1; second <= 6; ++second) {
+            failures += check(!filter.update(double(second), s).has_value(),
+                              "ETA filter estimates through a tokenless window");
+        }
+        s.staged_prefill_tokens_done = 2048;
+        const std::optional<double> eta = filter.update(7.0, s);
+        // The six-second window (samples 1..7) completed 1024 tokens: 1024/6 s.
+        failures += check(eta.has_value() &&
+                              std::abs(*eta - (4096.0 - 2048.0) / (1024.0 / 6.0)) < 0.01,
+                          "ETA filter window rate mismatch after a blocked stretch");
     }
     {
-        // The prefill finished inside the window: nothing left to estimate.
-        ninfer::RuntimeStats prev, cur;
-        prev.staged_prefill_tokens_done  = 1024;
-        prev.staged_prefill_tokens_total = 2048;
-        cur.staged_prefill_tokens_done   = 2048;
-        cur.staged_prefill_tokens_total  = 2048;
-        failures += check(
-            !estimate_staged_prefill_eta_seconds(prev, cur, 2.0).has_value(),
-            "staged prefill ETA estimate for a completed prefill");
+        // An idle gap clears the filter state; the next prefill starts a fresh series.
+        StagedPrefillEtaFilter filter;
+        ninfer::RuntimeStats active;
+        active.staged_prefill_tokens_total = 2048;
+        active.staged_prefill_tokens_done  = 512;
+        (void)filter.update(0.0, active);
+        active.staged_prefill_tokens_done = 1024;
+        (void)filter.update(1.0, active);
+        const ninfer::RuntimeStats idle;
+        failures += check(!filter.update(2.0, idle).has_value(),
+                          "ETA filter reports without an in-flight prefill");
+        active.staged_prefill_tokens_total = 8192;
+        active.staged_prefill_tokens_done  = 1024;
+        failures += check(!filter.update(3.0, active).has_value(),
+                          "ETA filter reuses state across an idle gap");
     }
 
     ThroughputReport idle;
