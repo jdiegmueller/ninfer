@@ -514,7 +514,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
 | `--prefill-chunk N` | text-prefill chunk | `1024` |
-| `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
+| `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `1000` |
 | `--device N` | CUDA device index | `0` |
 | `--max-request-mib N` | body-size limit before JSON parsing | `384` |
 | `--media-cache-mib N` | LRU-retained prepared BF16 media payloads; `0` disables retention | `1024` |
@@ -596,7 +596,7 @@ matching start. Later generation failures produce `request_error`. Schema/model 
 rejections before preparation and token-count-only calls are not measurement requests and do not
 receive request IDs.
 
-By default the server also reports aggregate activity every five seconds. `prefill` counts prompt
+By default the server also reports aggregate activity every second. `prefill` counts prompt
 suffix tokens actually computed during the interval, excluding prefix-cache hits; `decode` counts
 tokens finally committed by decode rounds, excluding the first token produced by prefill. For MTP
 and DFlash this is the accepted committed output, not draft or rejected tokens.
