@@ -290,11 +290,35 @@ public:
         const bool alpha = composite_alpha && descriptor != nullptr &&
                            (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
         const AVPixelFormat destination_format = alpha ? AV_PIX_FMT_RGBA : AV_PIX_FMT_RGB24;
+        // FFmpeg deprecated the full-range "YUVJ" formats (the MJPEG decoder emits YUVJ420P for
+        // JPEG content). Scale from the modern equivalent and declare the full (JPEG) input range
+        // explicitly: the same treatment libswscale applies internally on its deprecation-warning
+        // path (sws_init_context -> handle_jpeg), without emitting that warning per media item.
+        AVPixelFormat source_format = static_cast<AVPixelFormat>(frame->format);
+        bool jpeg_input             = false;
+        switch (source_format) {
+        case AV_PIX_FMT_YUVJ420P: source_format = AV_PIX_FMT_YUV420P; jpeg_input = true; break;
+        case AV_PIX_FMT_YUVJ411P: source_format = AV_PIX_FMT_YUV411P; jpeg_input = true; break;
+        case AV_PIX_FMT_YUVJ422P: source_format = AV_PIX_FMT_YUV422P; jpeg_input = true; break;
+        case AV_PIX_FMT_YUVJ444P: source_format = AV_PIX_FMT_YUV444P; jpeg_input = true; break;
+        case AV_PIX_FMT_YUVJ440P: source_format = AV_PIX_FMT_YUV440P; jpeg_input = true; break;
+        default: break;
+        }
         AvImageBuffer converted(width, height, destination_format);
-        sws_ = sws_getCachedContext(sws_, width, height, static_cast<AVPixelFormat>(frame->format),
-                                    width, height, destination_format, SWS_POINT, nullptr, nullptr,
-                                    nullptr);
+        sws_ = sws_getCachedContext(sws_, width, height, source_format, width, height,
+                                    destination_format, SWS_POINT, nullptr, nullptr, nullptr);
         if (sws_ == nullptr) { throw std::runtime_error("failed to create media color converter"); }
+        if (jpeg_input) {
+            const int* coefficients = sws_getCoefficients(SWS_CS_DEFAULT);
+            const int range_result  = sws_setColorspaceDetails(sws_, coefficients, /*srcRange=*/1,
+                                                               coefficients, /*dstRange=*/0,
+                                                               /*brightness=*/0,
+                                                               /*contrast=*/1 << 16,
+                                                               /*saturation=*/1 << 16);
+            if (range_result < 0) {
+                throw std::runtime_error("failed to declare media source color range");
+            }
+        }
         const int rows = sws_scale(sws_, frame->data, frame->linesize, 0, height, converted.data(),
                                    converted.linesize());
         if (rows != height) { throw std::runtime_error("failed to convert media frame to RGB"); }
