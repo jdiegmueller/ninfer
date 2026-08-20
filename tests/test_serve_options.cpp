@@ -35,7 +35,7 @@ int main() {
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
     failures += check(defaults.request_log_jsonl.empty(),
                       "request JSONL logging is not disabled by default");
-    failures += check(defaults.log_stats_interval_ms == 1000,
+    failures += check(defaults.log_stats_interval_ms == 2000,
                       "periodic throughput interval default mismatch");
     failures += check(defaults.media_cache_bytes == ninfer::kDefaultMediaCacheBytes &&
                           defaults.media_live_bytes == ninfer::kDefaultMediaLiveBytes &&

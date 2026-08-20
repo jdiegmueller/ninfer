@@ -100,9 +100,11 @@ std::string format_request_error(const RequestLogContext& context, const std::st
 std::string format_throughput(const ThroughputReport& report);
 
 // Damps the per-interval prefill rate into a stable remaining-time estimate. The Engine runs at
-// most one staged prefill at a time; the filter integrates the tokens that prefill completed
-// over the shorter of a trailing six-second window or its observed lifetime, and resets when
-// the samples stop referring to that prefill (a new admission, a completion, or an idle gap).
+// most one staged prefill at a time; the prefill's pace is the slowest sustained two-interval
+// pace inside a trailing six-second window (or its observed lifetime if younger). A slowdown is
+// adopted immediately (the estimate biases high) and a faster pace closes half its gap per
+// sample, so a transient stall settles over a few samples. The filter resets when the samples
+// stop referring to that prefill (a new admission, a completion, or an idle gap).
 // Single-threaded: feed one sample per stats interval.
 class StagedPrefillEtaFilter {
 public:
@@ -121,6 +123,7 @@ private:
     std::deque<Sample> samples_;  // head is the first observation of the current prefill
     std::uint32_t prefill_total_  = 0;
     bool have_prefill_            = false;
+    std::optional<double> rate_;  // the damped prefill pace (tokens/s); nullopt until set
 };
 
 // Pure JSON formatters are public to repository tests. Each return value is one complete JSON

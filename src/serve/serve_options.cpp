@@ -89,7 +89,7 @@ std::string serve_usage_text(const char* argv0) {
            "       --model-id overrides the artifact identity.model_id reported by the server\n"
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
-           "       --log-stats-interval-ms defaults to 1000; 0 disables periodic throughput logs\n"
+           "       --log-stats-interval-ms defaults to 2000; 0 disables periodic throughput logs\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +

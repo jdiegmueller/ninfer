@@ -514,7 +514,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
 | `--prefill-chunk N` | text-prefill chunk | `1024` |
-| `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `1000` |
+| `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `2000` |
 | `--device N` | CUDA device index | `0` |
 | `--max-request-mib N` | body-size limit before JSON parsing | `384` |
 | `--media-cache-mib N` | LRU-retained prepared BF16 media payloads; `0` disables retention | `1024` |
@@ -596,7 +596,7 @@ matching start. Later generation failures produce `request_error`. Schema/model 
 rejections before preparation and token-count-only calls are not measurement requests and do not
 receive request IDs.
 
-By default the server also reports aggregate activity every second. `prefill` counts prompt
+By default the server also reports aggregate activity every two seconds. `prefill` counts prompt
 suffix tokens actually computed during the interval, excluding prefix-cache hits; `decode` counts
 tokens finally committed by decode rounds, excluding the first token produced by prefill. For MTP
 and DFlash this is the accepted committed output, not draft or rejected tokens.
@@ -605,11 +605,12 @@ and DFlash this is the accepted committed output, not draft or rejected tokens.
 the end of the interval. When that snapshot carries a staged prefill, the report also shows
 `prefill_progress` as the prompt-suffix tokens already computed for that request over the total it
 must compute, for example `prefill_progress=1024/8192 (12.5%) prefill_eta_s=4`. `prefill_eta_s`
-is a best-effort estimate of the remaining prefill time, averaged over the shorter of the trailing
-six seconds or the prefill's lifetime so per-chunk rate quantization cannot make it jump;
-it is omitted while no usable window exists (the prefill's first samples, a prefill boundary,
-a window in which it completed no tokens, or once the prefill has completed). The JSONL
-equivalent of the progress is
+is a deliberately high-biased estimate of the remaining prefill time: the prefill's pace is the
+slowest sustained two-interval pace in the trailing six seconds (or the prefill's whole lifetime
+if younger), a slowdown is reflected immediately, and a faster pace closes only half its gap per
+sample, so a transient stall settles over a few samples instead of zigzagging. It is omitted
+while no usable pace exists (the prefill's first samples, a prefill boundary, a window in which
+it completed no tokens, or once the prefill has completed). The JSONL equivalent of the progress is
 `scheduler.staged_prefill` with `done`/`total`, or `null` when nothing is being prefilled. Fully
 idle zero intervals are omitted. The JSONL `throughput` event keeps
 the raw token and round deltas as well as derived rates; downstream measurement should prefer those

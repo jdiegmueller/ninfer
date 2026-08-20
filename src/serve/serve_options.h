@@ -32,7 +32,7 @@ struct ServeOptions {
     std::uint32_t max_pending_requests     = 16;
     std::uint32_t pending_timeout_ms       = 30000;
     std::uint32_t prefill_chunk            = 1024;
-    std::uint32_t log_stats_interval_ms    = 1000; // 0 disables periodic Engine throughput logs
+    std::uint32_t log_stats_interval_ms    = 2000; // 0 disables periodic Engine throughput logs
     std::size_t max_request_bytes          = kDefaultMaxRequestBytes;
     std::size_t media_cache_bytes          = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes           = kDefaultMediaLiveBytes;

@@ -416,8 +416,9 @@ std::optional<double> StagedPrefillEtaFilter::update(double timestamp_seconds,
     if (!same_prefill) {
         // No in-flight prefill, or the samples crossed a prefill boundary (a new admission,
         // a completion followed by a same-sized restart, or an idle gap): start a fresh
-        // series at this sample. Its first sample has no span to measure a rate from.
+        // series at this sample. Its first sample has no span to measure a pace from.
         samples_.clear();
+        rate_ = std::nullopt;
         if (total == 0) {
             have_prefill_  = false;
             prefill_total_ = 0;
@@ -432,13 +433,10 @@ std::optional<double> StagedPrefillEtaFilter::update(double timestamp_seconds,
     if (done == total) {
         return std::nullopt;  // finished: nothing left to estimate
     }
-    // Integrate over the shorter of the trailing window or the prefill's observed lifetime. The
-    // series head is retained: young prefills average over everything seen so far, which damps
-    // the per-chunk rate quantization (an interval completes an integer number of prefill
-    // chunks) while a sustained mid-prefill rate change still shows up within the window. The
-    // span is six seconds so that, at the default one-second stats cadence, it holds a whole
-    // even number of intervals: the common two/three-chunk-per-interval pattern then contains
-    // a balanced mix in every window and cannot make the estimate alternate.
+    // The window is the shorter of the trailing six seconds or the prefill's observed
+    // lifetime; the series head is retained so young prefills use everything seen so far.
+    // Six seconds is how long a transient stall keeps the estimate high before the faster
+    // pace settles back in.
     constexpr double kWindowSeconds = 6.0;
     const Sample& first = samples_.front();
     const double window_start = std::max(first.timestamp_seconds,
@@ -447,14 +445,48 @@ std::optional<double> StagedPrefillEtaFilter::update(double timestamp_seconds,
     while (oldest + 1 < samples_.size() && samples_[oldest].timestamp_seconds < window_start) {
         ++oldest;
     }
-    const Sample& span_start = samples_[oldest];
-    const double span_seconds = timestamp_seconds - span_start.timestamp_seconds;
-    const std::uint64_t span_done = static_cast<std::uint64_t>(done) - span_start.done;
-    if (span_seconds <= 0.0 || span_done == 0) {
-        return std::nullopt;  // no tokens completed inside the span (e.g. a blocked prefill)
+    // The prefill's pace, as the slowest sustained pace inside the window: the minimum
+    // average over two consecutive intervals. A single interval completes a whole number of
+    // prefill chunks, so its rate is quantized and alternates between samples; a two-interval
+    // span holds a balanced mix of that alternation. Stalled stretches contribute no pace;
+    // a window without any completed tokens has none either.
+    double pace = 0.0;
+    bool have_pace = false;
+    for (std::size_t i = oldest; i + 2 < samples_.size(); ++i) {
+        const double span_seconds =
+            samples_[i + 2].timestamp_seconds - samples_[i].timestamp_seconds;
+        const std::uint32_t span_done = samples_[i + 2].done - samples_[i].done;
+        if (span_seconds <= 0.0 || span_done == 0) {
+            continue;
+        }
+        const double sub = static_cast<double>(span_done) / span_seconds;
+        if (!have_pace || sub < pace) {
+            pace = sub;
+            have_pace = true;
+        }
     }
-    const double rate = static_cast<double>(span_done) / span_seconds;
-    return static_cast<double>(total - done) / rate;
+    if (!have_pace && samples_.size() >= 2) {
+        // A window holding a single interval falls back to that interval's rate.
+        const double span_seconds =
+            samples_.back().timestamp_seconds - samples_[oldest].timestamp_seconds;
+        const std::uint32_t span_done = done - samples_[oldest].done;
+        if (span_seconds > 0.0 && span_done > 0) {
+            pace = static_cast<double>(span_done) / span_seconds;
+            have_pace = true;
+        }
+    }
+    if (!have_pace) {
+        return std::nullopt;  // no tokens completed inside the window
+    }
+    // A slower pace is adopted immediately, so the estimate biases high right when the prefill
+    // slows down; a faster pace closes only half its gap per sample, so a transient stall
+    // settles over a few samples instead of making the estimate zigzag.
+    if (!rate_.has_value() || pace < *rate_) {
+        *rate_ = pace;
+    } else {
+        *rate_ += 0.5 * (pace - *rate_);
+    }
+    return static_cast<double>(total - done) / *rate_;
 }
 
 std::string format_throughput(const ThroughputReport& report) {

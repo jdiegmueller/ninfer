@@ -439,10 +439,11 @@ int main() {
         }
         s.staged_prefill_tokens_done = 2048;
         const std::optional<double> eta = filter.update(7.0, s);
-        // The six-second window (samples 1..7) completed 1024 tokens: 1024/6 s.
+        // The only non-stalled two-interval span in the window (samples 5..7) completed
+        // 1024 tokens in 2 s: 512 tok/s.
         failures += check(eta.has_value() &&
-                              std::abs(*eta - (4096.0 - 2048.0) / (1024.0 / 6.0)) < 0.01,
-                          "ETA filter window rate mismatch after a blocked stretch");
+                              std::abs(*eta - (4096.0 - 2048.0) / (1024.0 / 2.0)) < 0.01,
+                          "ETA filter window pace mismatch after a blocked stretch");
     }
     {
         // An idle gap clears the filter state; the next prefill starts a fresh series.
@@ -460,6 +461,38 @@ int main() {
         active.staged_prefill_tokens_done  = 1024;
         failures += check(!filter.update(3.0, active).has_value(),
                           "ETA filter reuses state across an idle gap");
+    }
+    {
+        // The production cadence (one sample per two seconds) with a transient stall: the
+        // estimate steps up immediately and then settles back down over a few samples.
+        StagedPrefillEtaFilter filter;
+        ninfer::RuntimeStats s;
+        s.staged_prefill_tokens_total = 102400;
+        std::uint32_t done = 0;
+        auto step = [&](double t, std::uint32_t tokens) {
+            done = std::min(done + tokens, s.staged_prefill_tokens_total);
+            s.staged_prefill_tokens_done = done;
+            return filter.update(t, s);
+        };
+        std::optional<double> eta = std::nullopt;
+        for (std::uint32_t i = 1; i <= 8; ++i) {
+            eta = step(2.0 * i, (i % 2 == 1) ? 6144U : 4096U);  // 3072/2048 tok/s
+        }
+        failures += check(eta.has_value(), "ETA filter drops the steady 2 s-cadence prefill");
+        const double before = eta.value_or(0.0);
+        eta = step(18.0, 2048);  // a slow two-second stretch
+        failures += check(eta.has_value() && *eta > before,
+                          "ETA filter does not bias high on a slowdown at 2 s cadence");
+        double previous = eta.value_or(0.0);
+        bool settling   = true;
+        for (std::uint32_t i = 10; i <= 14; ++i) {
+            eta = step(2.0 * i, (i % 2 == 1) ? 6144U : 4096U);
+            if (eta.has_value()) {
+                if (*eta > previous + 0.5) { settling = false; }
+                previous = *eta;
+            }
+        }
+        failures += check(settling, "ETA filter zigzags while recovering at 2 s cadence");
     }
 
     ThroughputReport idle;
